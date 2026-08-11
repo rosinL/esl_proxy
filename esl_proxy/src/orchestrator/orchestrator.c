@@ -143,6 +143,13 @@ int main(int argc, char *argv[])
 
     printf("submit (%d threads): %llu ns\n",
            M, (unsigned long long)(t3_end - t3));
+    for (int i = 0; i < M; i++) {
+        int cnt = 0;
+        for (int t = i; t < total_tasks; t += M)
+            cnt++;
+        printf("total_tasks=%d  submit thread %2d: tasks=%d  time=%llu ns throughput=%.2f MTasks/s\n",
+               total_tasks, i , cnt, (unsigned long long)sub_args[i].elapsed_ns, (double)total_tasks/(double)sub_args[i].elapsed_ns * 1000);
+    }
 
     uint64_t end_ns = get_time_ns();
     printf("orchestrator total elapsed (1 alloc + %d desc + %d submit): %llu ns\n",
