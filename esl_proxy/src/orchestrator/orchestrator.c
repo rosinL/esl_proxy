@@ -7,6 +7,43 @@
 
 #include "log.h"
 #include "orch_config.h"
+#include "ring_buf.h"
+
+extern struct predecessor_list g_predecessors[];
+
+static int dump_predecessors(const char *path, int total_task_cnt)
+{
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        perror(path);
+        return -1;
+    }
+    fprintf(fp, "# predecessors dump total_task_cnt=%d\n", total_task_cnt);
+    for (int tid = 0; tid < total_task_cnt; tid++) {
+        struct predecessor_list *pl = &g_predecessors[tid];
+        uint32_t cnt = pl->cnt;
+        uint32_t tmp[256];
+        if (cnt > 256)
+            cnt = 256;
+        for (uint32_t i = 0; i < cnt; i++)
+            tmp[i] = pl->exp[i];
+        for (uint32_t i = 1; i < cnt; i++) {
+            uint32_t v = tmp[i];
+            uint32_t j = i;
+            while (j > 0 && tmp[j - 1] > v) {
+                tmp[j] = tmp[j - 1];
+                j--;
+            }
+            tmp[j] = v;
+        }
+        fprintf(fp, "%d %u", tid, cnt);
+        for (uint32_t i = 0; i < cnt; i++)
+            fprintf(fp, " %u", tmp[i]);
+        fprintf(fp, "\n");
+    }
+    fclose(fp);
+    return 0;
+}
 
 /* Declared in orc_alloc.c / orc_desc.c (separate translation units to avoid
  * symbol conflicts between qwen3_14b_decoder_alloc.h and
@@ -181,6 +218,12 @@ int main(int argc, char *argv[])
     printf("orchestrator total elapsed time (1 alloc + %d desc + %d submit threads): %llu ns\n",
            desc_thread_count, desc_thread_count, (unsigned long long)elapsed_ns);
     printf("desc=%d  submit=%d\n", total_cnt, total_submit_cnt);
+
+    const char *dump_path = getenv("DEP_DUMP_PATH");
+    if (dump_path && dump_path[0]) {
+        dump_predecessors(dump_path, total_tasks);
+        printf("wrote predecessor dump: %s\n", dump_path);
+    }
 
     free(submit_args);
     free(submit_threads);

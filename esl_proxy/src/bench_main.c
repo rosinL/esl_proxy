@@ -31,6 +31,41 @@ static when2free_entry_t g_when2free_entries[WHEN2FREE_CAP];
 extern atomic_bool g_orch_is_done;
 extern atomic_int g_task_id;
 extern int g_subtask_cnt;
+extern struct predecessor_list g_predecessors[];
+
+static int dump_predecessors(const char *path, int total_task_cnt)
+{
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        perror(path);
+        return -1;
+    }
+    fprintf(fp, "# predecessors dump total_task_cnt=%d\n", total_task_cnt);
+    for (int tid = 0; tid < total_task_cnt; tid++) {
+        struct predecessor_list *pl = &g_predecessors[tid];
+        uint32_t cnt = pl->cnt;
+        uint32_t tmp[256];
+        if (cnt > 256)
+            cnt = 256;
+        for (uint32_t i = 0; i < cnt; i++)
+            tmp[i] = pl->exp[i];
+        for (uint32_t i = 1; i < cnt; i++) {
+            uint32_t v = tmp[i];
+            uint32_t j = i;
+            while (j > 0 && tmp[j - 1] > v) {
+                tmp[j] = tmp[j - 1];
+                j--;
+            }
+            tmp[j] = v;
+        }
+        fprintf(fp, "%d %u", tid, cnt);
+        for (uint32_t i = 0; i < cnt; i++)
+            fprintf(fp, " %u", tmp[i]);
+        fprintf(fp, "\n");
+    }
+    fclose(fp);
+    return 0;
+}
 
 int main(void)
 {
@@ -51,6 +86,12 @@ int main(void)
            task_cnt,
            (unsigned long long)elapsed_ns,
            elapsed_ns > 0 ? (double)task_cnt * 1000.0 / (double)elapsed_ns : 0.0);
+
+    const char *dump_path = getenv("DEP_DUMP_PATH");
+    if (dump_path && dump_path[0]) {
+        dump_predecessors(dump_path, task_cnt);
+        printf("wrote predecessor dump: %s\n", dump_path);
+    }
 
     return 0;
 }
