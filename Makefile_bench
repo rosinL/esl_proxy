@@ -1,0 +1,80 @@
+# Makefile_bench — benchmark aicpu_orchestration_entry for 4 case headers.
+#
+# Usage:
+#   make -f Makefile_bench                      # build all 4 cases
+#   make -f Makefile_bench run                  # build + run all 4 cases
+#   make -f Makefile_bench run CASE=qwen3_dynamic_tensormap.h
+#   make -f Makefile_bench run CASE=qwen3_dynamic_tensormap.h SPMD_TIER=0
+#   make -f Makefile_bench clean
+
+CC       := cc
+CFLAGS   := -g -std=c11 -O2 -D_POSIX_C_SOURCE=199309L \
+            -I esl_proxy/include/algorithm -I esl_proxy/cases \
+            -Wno-error=implicit-function-declaration
+
+UNAME_S  := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+    LDFLAGS := -lpthread -latomic
+else
+    LDFLAGS := -lpthread
+endif
+
+OBJ_DIR  := build/bench
+BIN_DIR  := bin
+
+CASES := \
+    qwen3_dynamic_tensormap.h \
+    qwen3_dynamic_manual_scope.h \
+    paged_attention_unroll.h \
+    paged_attention_unroll_manual_scope.h
+
+# Binary names: strip .h suffix, add bench_ prefix
+NAMES  := $(patsubst %.h,%,$(CASES))
+BINS   := $(addprefix $(BIN_DIR)/bench_,$(NAMES))
+
+SRCS_CORE := \
+    esl_proxy/src/algorithm/log.c \
+    esl_proxy/src/algorithm/shm.c
+
+# Optional SPMD tier override (only affects qwen3 cases)
+ifdef SPMD_TIER
+EXTRA_CFLAGS += -DQWEN3_SPMD_TIER=$(SPMD_TIER)
+endif
+
+EXTRA_CFLAGS += -DNODE_BUFF_SIZE=65536
+CFLAGS += $(EXTRA_CFLAGS)
+
+.PHONY: all run clean
+
+all: $(BINS)
+
+# Explicit rules per case — avoids pattern rule stem ambiguity with .h suffix.
+define BENCH_RULE
+$(OBJ_DIR)/bench_$(1).o: esl_proxy/src/bench_main.c | $(OBJ_DIR)
+	$$(CC) $$(CFLAGS) -DORCH_CASE=$(1).h -c $$< -o $$@
+
+$(BIN_DIR)/bench_$(1): $(OBJ_DIR)/bench_$(1).o $$(SRCS_CORE) | $$(BIN_DIR)
+	$$(CC) $$(CFLAGS) $$< $$(SRCS_CORE) -o $$@ $$(LDFLAGS)
+endef
+
+$(foreach name,$(NAMES),$(eval $(call BENCH_RULE,$(name))))
+
+# Build + run a single case (make run CASE=foo.h [SPMD_TIER=0])
+ifdef CASE
+NAME := $(patsubst %.h,%,$(CASE))
+run: $(BIN_DIR)/bench_$(NAME)
+	./$(BIN_DIR)/bench_$(NAME)
+else
+run: all
+	@for bin in $(BINS); do \
+		echo "=== $$(basename $$bin) ==="; \
+		./$$bin; \
+		echo; \
+	done
+endif
+
+$(OBJ_DIR) $(BIN_DIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(OBJ_DIR) $(BINS)
