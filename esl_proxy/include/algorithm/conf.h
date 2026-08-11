@@ -4,7 +4,9 @@
 #define RING_SIZE 4096
 #define RING_MASK (RING_SIZE - 1)
 #define HALF_RING_SIZE 2048
-#define NODE_BUFF_SIZE 8192
+#ifndef NODE_BUFF_SIZE
+#define NODE_BUFF_SIZE 65536
+#endif
 
 // TODO: ERROR
 #define CON_NODE_CNT 32

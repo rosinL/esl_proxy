@@ -25,6 +25,7 @@ SRCS := \
     esl_proxy/src/orchestrator/orchestrator.c \
     esl_proxy/src/orchestrator/orc_alloc.c \
     esl_proxy/src/orchestrator/orc_desc.c \
+    esl_proxy/src/orchestrator/orc_submit.c \
     esl_proxy/src/algorithm/log.c \
     esl_proxy/src/algorithm/shm.c
 
@@ -32,6 +33,7 @@ SRCS_AP := \
     esl_proxy/src/orchestrator/orchestrator.c \
     esl_proxy/src/orchestrator/orc_alloc.c \
     esl_proxy/src/orchestrator/orc_desc_ap.c \
+    esl_proxy/src/orchestrator/orc_submit.c \
     esl_proxy/src/algorithm/log.c \
     esl_proxy/src/algorithm/shm.c
 

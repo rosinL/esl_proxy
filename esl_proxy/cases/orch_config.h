@@ -19,7 +19,7 @@
 #define MAX_TENSOR_NUM 2048
 #endif
 
-#define RING_SIZE 2048
+#define RING_SIZE 4096
 
 #ifndef QWEN3_SPMD_TIER
 #define QWEN3_SPMD_TIER 0

@@ -13,6 +13,9 @@
  * qwen3_14b_decoder_desc.h) */
 void orc_alloc_call(uint64_t orch_args);
 int orc_desc_call(uint64_t orch_args, int thread_id, int *created_cnt);
+void orc_submit_init(int thread_count);
+void orc_submit_cleanup(void);
+int orc_submit_call(int thread_id, int total_tasks, int *submit_cnt);
 
 struct desc_thread_arg {
     uint64_t orch_args;
@@ -22,8 +25,15 @@ struct desc_thread_arg {
     uint64_t elapsed_ns;
 };
 
+struct submit_thread_arg {
+    int thread_id;
+    int total_tasks;
+    int submit_cnt;
+    uint64_t elapsed_ns;
+};
+
 int desc_thread_count = DESC_THREAD_COUNT;
-int desc_batch_size = 128;
+int desc_batch_size = 32;
 
 static void *alloc_thread_func(void *arg)
 {
@@ -37,6 +47,16 @@ static void *desc_thread_func(void *arg)
     struct desc_thread_arg *targ = (struct desc_thread_arg *)arg;
     uint64_t t0 = get_time_ns();
     targ->task_count = orc_desc_call(targ->orch_args, targ->thread_id, &targ->created_cnt);
+    uint64_t t1 = get_time_ns();
+    targ->elapsed_ns = t1 - t0;
+    return NULL;
+}
+
+static void *submit_thread_func(void *arg)
+{
+    struct submit_thread_arg *targ = (struct submit_thread_arg *)arg;
+    uint64_t t0 = get_time_ns();
+    orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt);
     uint64_t t1 = get_time_ns();
     targ->elapsed_ns = t1 - t0;
     return NULL;
@@ -85,8 +105,8 @@ int main(int argc, char *argv[])
         pthread_join(desc_threads[i], NULL);
     }
 
-    end_ns = get_time_ns();
-    elapsed_ns = end_ns - start_ns;
+    uint64_t desc_end_ns = get_time_ns();
+
     /* Print per-thread throughput: desc_task_id / execution_time (MTasks/s) */
     printf("desc_thread throughput (MTasks/s):\n");
     int total_cnt = 0;
@@ -103,9 +123,67 @@ int main(int argc, char *argv[])
                time_240_us);
         total_cnt += desc_args[i].created_cnt;
     }
-    printf("orchestrator total elapsed time (1 alloc + %d desc threads): %llu ns\n",
-           desc_thread_count, (unsigned long long)elapsed_ns);
-    printf("desc=%d\n", total_cnt);
+
+    int total_tasks = desc_args[0].task_count;
+
+    /* Phase 3: Parallel tm_submit (dependency discovery)
+     * Runs after all desc threads complete, so g_task_tensor_buf is fully
+     * populated. Uses two sub-phases with a barrier:
+     *   3a: parallel insert all output tensors into tensormap
+     *   --- barrier ---
+     *   3b: parallel lookup predecessors for all input tensors */
+    orc_submit_init(desc_thread_count);
+
+    pthread_t *submit_threads = malloc((size_t)desc_thread_count * sizeof(pthread_t));
+    struct submit_thread_arg *submit_args = malloc((size_t)desc_thread_count * sizeof(struct submit_thread_arg));
+    if (!submit_threads || !submit_args) {
+        fprintf(stderr, "Failed to allocate submit thread arrays\n");
+        free(submit_threads);
+        free(submit_args);
+        free(desc_args);
+        free(desc_threads);
+        return 1;
+    }
+
+    for (int i = 0; i < desc_thread_count; i++) {
+        submit_args[i].thread_id = i;
+        submit_args[i].total_tasks = total_tasks;
+        submit_args[i].submit_cnt = 0;
+        pthread_create(&submit_threads[i], NULL, submit_thread_func, &submit_args[i]);
+    }
+
+    for (int i = 0; i < desc_thread_count; i++) {
+        pthread_join(submit_threads[i], NULL);
+    }
+
+    orc_submit_cleanup();
+
+    end_ns = get_time_ns();
+    elapsed_ns = end_ns - start_ns;
+
+    /* Print submit phase throughput */
+    printf("\nsubmit_thread throughput (MTasks/s):\n");
+    int total_submit_cnt = 0;
+    for (int i = 0; i < desc_thread_count; i++) {
+        double throughput = (double)submit_args[i].submit_cnt / (double)submit_args[i].elapsed_ns * (double)1000.0;
+        printf("  thread %2d: submitted=%d  time=%llu ns  throughput=%.2f MTasks/s\n",
+               submit_args[i].thread_id,
+               submit_args[i].submit_cnt,
+               (unsigned long long)submit_args[i].elapsed_ns,
+               throughput);
+        total_submit_cnt += submit_args[i].submit_cnt;
+    }
+
+    uint64_t submit_elapsed = end_ns - desc_end_ns;
+    printf("\nphase timing:\n");
+    printf("  alloc+desc phase: %llu ns\n", (unsigned long long)(desc_end_ns - start_ns));
+    printf("  submit phase:     %llu ns\n", (unsigned long long)submit_elapsed);
+    printf("orchestrator total elapsed time (1 alloc + %d desc + %d submit threads): %llu ns\n",
+           desc_thread_count, desc_thread_count, (unsigned long long)elapsed_ns);
+    printf("desc=%d  submit=%d\n", total_cnt, total_submit_cnt);
+
+    free(submit_args);
+    free(submit_threads);
     free(desc_args);
     free(desc_threads);
     return 0;
