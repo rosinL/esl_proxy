@@ -26,8 +26,9 @@ struct desc_thread_arg {
 };
 
 struct submit_work_arg {
-    int start;
-    int end;
+    int total_tasks;
+    int thread_count;
+    int thread_id;
     uint64_t elapsed_ns;
 };
 
@@ -56,7 +57,7 @@ static void *submit_thread_func(void *arg)
 {
     struct submit_work_arg *w = (struct submit_work_arg *)arg;
     uint64_t t0 = get_time_ns();
-    for (int t = w->start; t < w->end; t++)
+    for (int t = w->thread_id; t < w->total_tasks; t += w->thread_count)
         orc_submit_task((uint32_t)t);
     w->elapsed_ns = get_time_ns() - t0;
     return NULL;
@@ -131,8 +132,9 @@ int main(int argc, char *argv[])
 
     uint64_t t3 = get_time_ns();
     for (int i = 0; i < M; i++) {
-        sub_args[i].start = (total_tasks * i) / M;
-        sub_args[i].end   = (total_tasks * (i + 1)) / M;
+        sub_args[i].total_tasks  = total_tasks;
+        sub_args[i].thread_count = M;
+        sub_args[i].thread_id    = i;
         pthread_create(&sub_threads[i], NULL, submit_thread_func, &sub_args[i]);
     }
     for (int i = 0; i < M; i++)
