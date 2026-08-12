@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200112L
 
 #include <pthread.h>
 #include <stdint.h>
@@ -72,6 +72,8 @@ struct submit_thread_arg {
 int desc_thread_count = DESC_THREAD_COUNT;
 int desc_batch_size = 32;
 
+static pthread_barrier_t g_phase_barrier;
+
 static void *alloc_thread_func(void *arg)
 {
     uint64_t orch_args = (uint64_t)(uintptr_t)arg;
@@ -82,6 +84,7 @@ static void *alloc_thread_func(void *arg)
 static void *desc_thread_func(void *arg)
 {
     struct desc_thread_arg *targ = (struct desc_thread_arg *)arg;
+    pthread_barrier_wait(&g_phase_barrier);
     uint64_t t0 = get_time_ns();
     targ->task_count = orc_desc_call(targ->orch_args, targ->thread_id, &targ->created_cnt);
     uint64_t t1 = get_time_ns();
@@ -92,6 +95,7 @@ static void *desc_thread_func(void *arg)
 static void *submit_thread_func(void *arg)
 {
     struct submit_thread_arg *targ = (struct submit_thread_arg *)arg;
+    pthread_barrier_wait(&g_phase_barrier);
     uint64_t t0 = get_time_ns();
     orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt);
     uint64_t t1 = get_time_ns();
@@ -132,6 +136,7 @@ int main(int argc, char *argv[])
         free(desc_threads);
         return 1;
     }
+    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count);
     for (int i = 0; i < desc_thread_count; i++) {
         desc_args[i].orch_args = 0;
         desc_args[i].thread_id = i;
@@ -141,6 +146,8 @@ int main(int argc, char *argv[])
     for (int i = 0; i < desc_thread_count; i++) {
         pthread_join(desc_threads[i], NULL);
     }
+
+    pthread_barrier_destroy(&g_phase_barrier);
 
     uint64_t desc_end_ns = get_time_ns();
 
@@ -185,6 +192,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count);
+
     for (int i = 0; i < desc_thread_count; i++) {
         submit_args[i].thread_id = i;
         submit_args[i].total_tasks = total_tasks;
@@ -195,6 +204,8 @@ int main(int argc, char *argv[])
     for (int i = 0; i < desc_thread_count; i++) {
         pthread_join(submit_threads[i], NULL);
     }
+
+    pthread_barrier_destroy(&g_phase_barrier);
 
     orc_submit_cleanup();
 

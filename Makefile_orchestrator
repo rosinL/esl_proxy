@@ -5,7 +5,7 @@
 #   make -f Makefile_orchestrator run    # compile and run
 
 CC       := cc
-CFLAGS   := -g -std=c11 -Wall -Wextra -pedantic -O2 -D_POSIX_C_SOURCE=199309L \
+CFLAGS   := -g -std=c11 -Wall -Wextra -pedantic -O2 -D_POSIX_C_SOURCE=200112L \
             -I esl_proxy/include/algorithm -I esl_proxy/cases \
             -MMD -MP -Wno-error=implicit-function-declaration
 
