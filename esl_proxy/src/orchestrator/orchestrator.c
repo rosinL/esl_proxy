@@ -1,9 +1,12 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200112L
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "log.h"
 #include "orch_config.h"
@@ -60,6 +63,7 @@ struct desc_thread_arg {
     int task_count;
     int created_cnt;
     uint64_t elapsed_ns;
+    int core_id;
 };
 
 struct submit_thread_arg {
@@ -67,12 +71,23 @@ struct submit_thread_arg {
     int total_tasks;
     int submit_cnt;
     uint64_t elapsed_ns;
+    int core_id;
 };
 
 int desc_thread_count = DESC_THREAD_COUNT;
 int desc_batch_size = 32;
 
 static pthread_barrier_t g_phase_barrier;
+
+static void pin_cpu(int core_id)
+{
+    if (core_id < 0)
+        return;
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+}
 
 static void *alloc_thread_func(void *arg)
 {
@@ -84,6 +99,7 @@ static void *alloc_thread_func(void *arg)
 static void *desc_thread_func(void *arg)
 {
     struct desc_thread_arg *targ = (struct desc_thread_arg *)arg;
+    pin_cpu(targ->core_id);
     pthread_barrier_wait(&g_phase_barrier);
     uint64_t t0 = get_time_ns();
     targ->task_count = orc_desc_call(targ->orch_args, targ->thread_id, &targ->created_cnt);
@@ -95,6 +111,7 @@ static void *desc_thread_func(void *arg)
 static void *submit_thread_func(void *arg)
 {
     struct submit_thread_arg *targ = (struct submit_thread_arg *)arg;
+    pin_cpu(targ->core_id);
     pthread_barrier_wait(&g_phase_barrier);
     uint64_t t0 = get_time_ns();
     orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt);
@@ -103,17 +120,55 @@ static void *submit_thread_func(void *arg)
     return NULL;
 }
 
+static void parse_cpu_range(const char *spec, int *out, int max_count)
+{
+    for (int i = 0; i < max_count; i++)
+        out[i] = -1;
+    if (!spec || !spec[0])
+        return;
+
+    int idx = 0;
+    const char *p = spec;
+    while (*p && idx < max_count) {
+        int lo = 0, hi = 0;
+        int n = 0;
+        if (sscanf(p, "%d-%d%n", &lo, &hi, &n) == 2) {
+            for (int c = lo; c <= hi && idx < max_count; c++)
+                out[idx++] = c;
+        } else if (sscanf(p, "%d%n", &lo, &n) == 1) {
+            out[idx++] = lo;
+        } else {
+            break;
+        }
+        p += n;
+        if (*p == ',')
+            p++;
+    }
+}
+
 int main(int argc, char *argv[])
 {
+    int desc_cpu[256];
+    parse_cpu_range(NULL, desc_cpu, 0);
+
+    /* Usage: orchestrator [thread_count] [cpu_range] */
     if (argc >= 2) {
         desc_thread_count = atoi(argv[1]);
-        // desc_batch_size = (240 / desc_thread_count & 127 + 1) * 128;
         if (desc_thread_count <= 0) {
-            fprintf(stderr, "Usage: %s [desc_desc_thread_count]  (default %d)\n",
-                    argv[0], DESC_THREAD_COUNT);
+            fprintf(stderr,
+                "Usage: %s [thread_count] [cpu_range]\n"
+                "  cpu_range: e.g. 0-7 or 0,2,4,6 or 0-3,8-11 (shared by desc+submit)\n"
+                "  omit cpu_range for no pinning\n",
+                argv[0]);
             return 1;
         }
     }
+    if (argc >= 3)
+        parse_cpu_range(argv[2], desc_cpu, desc_thread_count);
+
+    int has_pin = (argc >= 3);
+    printf("threads=%d  cpu_pin=%s\n",
+           desc_thread_count, has_pin ? "yes" : "no");
 
     pthread_t alloc_thread;
     pthread_t *desc_threads = malloc((size_t)desc_thread_count * sizeof(pthread_t));
@@ -140,6 +195,7 @@ int main(int argc, char *argv[])
     for (int i = 0; i < desc_thread_count; i++) {
         desc_args[i].orch_args = 0;
         desc_args[i].thread_id = i;
+        desc_args[i].core_id = desc_cpu[i];
         pthread_create(&desc_threads[i], NULL, desc_thread_func, &desc_args[i]);
     }
 
@@ -198,6 +254,7 @@ int main(int argc, char *argv[])
         submit_args[i].thread_id = i;
         submit_args[i].total_tasks = total_tasks;
         submit_args[i].submit_cnt = 0;
+        submit_args[i].core_id = desc_cpu[i];
         pthread_create(&submit_threads[i], NULL, submit_thread_func, &submit_args[i]);
     }
 
