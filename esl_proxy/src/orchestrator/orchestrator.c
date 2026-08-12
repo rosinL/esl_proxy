@@ -12,6 +12,7 @@
 #include "orch_config.h"
 #include "ring_buf.h"
 
+extern uint32_t alloc_task_id;
 extern struct predecessor_list g_predecessors[];
 
 static int dump_predecessors(const char *path, int total_task_cnt)
@@ -112,7 +113,6 @@ static void *submit_thread_func(void *arg)
 {
     struct submit_thread_arg *targ = (struct submit_thread_arg *)arg;
     pin_cpu(targ->core_id);
-    pthread_barrier_wait(&g_phase_barrier);
     uint64_t t0 = get_time_ns();
     orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt);
     uint64_t t1 = get_time_ns();
@@ -184,26 +184,49 @@ int main(int argc, char *argv[])
     pthread_create(&alloc_thread, NULL, alloc_thread_func, (void *)(uintptr_t)0);
     pthread_join(alloc_thread, NULL);
 
-    /* N orchestrator_desc threads in parallel (started after alloc thread finishes) */
+    int total_tasks = (int)alloc_task_id;
+
+    /* Init ready flags for pipeline */
+    for (int i = 0; i < RING_SIZE; i++)
+        atomic_store(&g_task_ready[i], 0);
+    orc_submit_init(desc_thread_count);
+
+    /* 2: desc + submit threads start together (pipeline)
+     * desc fills g_task_tensor_buf[tid] and sets g_task_ready[tid]
+     * submit spins on g_task_ready[tid] then processes */
     struct desc_thread_arg *desc_args = malloc((size_t)desc_thread_count * sizeof(struct desc_thread_arg));
-    if (!desc_args) {
-        fprintf(stderr, "Failed to allocate desc thread args\n");
+    struct submit_thread_arg *submit_args = malloc((size_t)desc_thread_count * sizeof(struct submit_thread_arg));
+    pthread_t *submit_threads = malloc((size_t)desc_thread_count * sizeof(pthread_t));
+    if (!desc_args || !submit_args || !submit_threads) {
+        fprintf(stderr, "Failed to allocate thread arrays\n");
+        free(desc_args); free(submit_args); free(submit_threads);
         free(desc_threads);
         return 1;
     }
+
     pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count);
+
     for (int i = 0; i < desc_thread_count; i++) {
         desc_args[i].orch_args = 0;
         desc_args[i].thread_id = i;
         desc_args[i].core_id = desc_cpu[i];
         pthread_create(&desc_threads[i], NULL, desc_thread_func, &desc_args[i]);
     }
-
     for (int i = 0; i < desc_thread_count; i++) {
-        pthread_join(desc_threads[i], NULL);
+        submit_args[i].thread_id = i;
+        submit_args[i].total_tasks = total_tasks;
+        submit_args[i].submit_cnt = 0;
+        submit_args[i].core_id = desc_cpu[i];
+        pthread_create(&submit_threads[i], NULL, submit_thread_func, &submit_args[i]);
     }
 
+    for (int i = 0; i < desc_thread_count; i++)
+        pthread_join(desc_threads[i], NULL);
+    for (int i = 0; i < desc_thread_count; i++)
+        pthread_join(submit_threads[i], NULL);
+
     pthread_barrier_destroy(&g_phase_barrier);
+    orc_submit_cleanup();
 
     uint64_t desc_end_ns = get_time_ns();
 
@@ -214,7 +237,6 @@ int main(int argc, char *argv[])
     uint64_t desc_min_ns = ~(0ULL);
     uint64_t desc_sum_ns = 0;
     for (int i = 0; i < desc_thread_count; i++) {
-        /* throughput = tasks / us   (because MTasks/s = tasks / (us * 1e-6) * 1e-6 = tasks / us) */
         double throughput = (double)desc_args[i].task_count / (double)desc_args[i].elapsed_ns * (double)1000.0;
         double time_240_us = 240.0 / throughput;
         printf("  thread %2d: tasks=%d  created=%d  time=%llu ns  throughput=%.2f MTasks/s  time_240=%.2f us\n",
@@ -231,48 +253,6 @@ int main(int argc, char *argv[])
             desc_min_ns = desc_args[i].elapsed_ns;
         desc_sum_ns += desc_args[i].elapsed_ns;
     }
-
-    int total_tasks = desc_args[0].task_count;
-
-    /* Phase 3: Parallel tm_submit (dependency discovery)
-     * Runs after all desc threads complete, so g_task_tensor_buf is fully
-     * populated. Uses two sub-phases with a barrier:
-     *   3a: parallel insert all output tensors into tensormap
-     *   --- barrier ---
-     *   3b: parallel lookup predecessors for all input tensors */
-    orc_submit_init(desc_thread_count);
-
-    pthread_t *submit_threads = malloc((size_t)desc_thread_count * sizeof(pthread_t));
-    struct submit_thread_arg *submit_args = malloc((size_t)desc_thread_count * sizeof(struct submit_thread_arg));
-    if (!submit_threads || !submit_args) {
-        fprintf(stderr, "Failed to allocate submit thread arrays\n");
-        free(submit_threads);
-        free(submit_args);
-        free(desc_args);
-        free(desc_threads);
-        return 1;
-    }
-
-    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count);
-
-    for (int i = 0; i < desc_thread_count; i++) {
-        submit_args[i].thread_id = i;
-        submit_args[i].total_tasks = total_tasks;
-        submit_args[i].submit_cnt = 0;
-        submit_args[i].core_id = desc_cpu[i];
-        pthread_create(&submit_threads[i], NULL, submit_thread_func, &submit_args[i]);
-    }
-
-    for (int i = 0; i < desc_thread_count; i++) {
-        pthread_join(submit_threads[i], NULL);
-    }
-
-    pthread_barrier_destroy(&g_phase_barrier);
-
-    orc_submit_cleanup();
-
-    end_ns = get_time_ns();
-    elapsed_ns = end_ns - start_ns;
 
     /* Print submit phase throughput */
     printf("\nsubmit_thread throughput (MTasks/s):\n");
@@ -295,20 +275,20 @@ int main(int argc, char *argv[])
         submit_sum_ns += submit_args[i].elapsed_ns;
     }
 
-    uint64_t submit_elapsed = end_ns - desc_end_ns;
+    end_ns = get_time_ns();
+    elapsed_ns = end_ns - start_ns;
+
     double desc_avg_ns = (double)desc_sum_ns / desc_thread_count;
     double submit_avg_ns = (double)submit_sum_ns / desc_thread_count;
     printf("\nphase timing:\n");
-    printf("  alloc+desc phase: %llu ns\n", (unsigned long long)(desc_end_ns - start_ns));
-    printf("  submit phase:     %llu ns\n", (unsigned long long)submit_elapsed);
+    printf("  total elapsed (alloc + desc||submit pipeline): %llu ns\n",
+           (unsigned long long)elapsed_ns);
     printf("  desc max thread time:   %llu ns\n", (unsigned long long)desc_max_ns);
     printf("  desc min thread time:   %llu ns\n", (unsigned long long)desc_min_ns);
     printf("  desc avg thread time:   %.0f ns\n", desc_avg_ns);
     printf("  submit max thread time: %llu ns\n", (unsigned long long)submit_max_ns);
     printf("  submit min thread time: %llu ns\n", (unsigned long long)submit_min_ns);
     printf("  submit avg thread time: %.0f ns\n", submit_avg_ns);
-    printf("orchestrator total elapsed time (1 alloc + %d desc + %d submit threads): %llu ns\n",
-           desc_thread_count, desc_thread_count, (unsigned long long)elapsed_ns);
     printf("desc=%d  submit=%d\n", total_cnt, total_submit_cnt);
     printf("desc  avg throughput = %d / %.0f ns = %.2f MTasks/s\n",
            total_tasks, desc_avg_ns,
@@ -322,12 +302,12 @@ int main(int argc, char *argv[])
     printf("submit min throughput = %d / %llu ns = %.2f MTasks/s\n",
            total_tasks, (unsigned long long)submit_max_ns,
            submit_max_ns > 0 ? (double)total_tasks * 1000.0 / (double)submit_max_ns : 0.0);
-    printf("throughput = %d / (%llu + %llu) ns = %.2f MTasks/s\n",
+    printf("pipeline throughput = %d / max(%llu, %llu) ns = %.2f MTasks/s\n",
            total_tasks,
            (unsigned long long)desc_max_ns,
            (unsigned long long)submit_max_ns,
-           (desc_max_ns + submit_max_ns) > 0
-               ? (double)total_tasks * 1000.0 / (double)(desc_max_ns + submit_max_ns)
+           (desc_max_ns > submit_max_ns ? desc_max_ns : submit_max_ns) > 0
+               ? (double)total_tasks * 1000.0 / (double)(desc_max_ns > submit_max_ns ? desc_max_ns : submit_max_ns)
                : 0.0);
 
     const char *dump_path = getenv("DEP_DUMP_PATH");

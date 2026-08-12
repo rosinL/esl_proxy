@@ -42,6 +42,7 @@ extern struct node_list g_successor_exp_buf[HALF_RING_SIZE];
 extern ctrl_t g_ctrl_t[DISPATCH_THREAD_CNT];
 
 extern int g_subtask_cnt;
+extern atomic_int g_task_ready[RING_SIZE];
 
 struct ring_buf {
     uint32_t size;

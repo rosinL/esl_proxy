@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <sched.h>
 
 #include "tensormap.h"
 #include "orch_config.h"
@@ -157,6 +158,10 @@ void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt)
     int n_owned = 0;
 
     for (int tid = 0; tid < total_tasks; tid++) {
+        while (!atomic_load_explicit(&g_task_ready[(uint32_t)tid & RING_MASK],
+                                     memory_order_acquire)) {
+            sched_yield();
+        }
         const struct task_tensor_desc *desc = &g_task_tensor_buf[(uint32_t)tid & RING_MASK];
         bool is_owned = submit_owns(tid, thread_id);
 

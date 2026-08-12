@@ -114,6 +114,7 @@ static inline void add_tensor_inout(uint16_t task_id, Tensor t)
             int __did = (task_id);                       \
             desc_created_cnt++;                      \
             __VA_ARGS__                              \
+            atomic_store_explicit(&g_task_ready[__did & RING_MASK], 1, memory_order_release); \
         }                                \
         (task_id)++;                                     \
     } while (0)

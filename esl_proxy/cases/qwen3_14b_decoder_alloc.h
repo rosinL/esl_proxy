@@ -42,7 +42,7 @@ Tensor ext_w_up;
 Tensor ext_w_down;
 Tensor ext_out;
 
-static uint32_t alloc_task_id = 0;
+uint32_t alloc_task_id = 0;
 
 static inline int qwen3_min_i(int a, int b) {
     return a < b ? a : b;

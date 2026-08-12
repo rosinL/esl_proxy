@@ -39,3 +39,5 @@ void init_predecessors(void)
     }
 }
 
+atomic_int g_task_ready[RING_SIZE];
+
