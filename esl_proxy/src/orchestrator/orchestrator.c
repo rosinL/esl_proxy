@@ -117,6 +117,7 @@ static void *submit_thread_func(void *arg)
 {
     struct submit_thread_arg *targ = (struct submit_thread_arg *)arg;
     pin_cpu(targ->core_id);
+    pthread_barrier_wait(&g_phase_barrier);
     targ->start_ns = get_time_ns();
     orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt);
     targ->end_ns = get_time_ns();
@@ -208,7 +209,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count);
+    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count * 2);
 
     for (int i = 0; i < desc_thread_count; i++) {
         submit_args[i].thread_id = i;
