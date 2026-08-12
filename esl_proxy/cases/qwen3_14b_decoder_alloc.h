@@ -92,13 +92,12 @@ void orchestrator_alloc(const uint64_t orch_args) {
     ext_w_down = tensor_from_base_layout(orch_args + 18, (uint32_t[]){17408, 5120}, 2, BFLOAT16); // intermediate=17408, hidden=5120
     ext_out = tensor_from_base_layout(orch_args + 19, (uint32_t[]){90, 5120}, 2, BFLOAT16); // batch=90, hidden=5120
 
-    const int64_t user_batch = 90; 
+    const int64_t user_batch = 90;
     const int64_t batch_padded = 96;
-    int t0 = alloc_tensors_v2((uint32_t[2]){batch_padded, 5120}, 2, FLOAT32);
-    int q_proj = alloc_tensors_v2((uint32_t[2]){batch_padded, 1024}, 2, FLOAT32);
+    int q_proj = alloc_tensors_v2((uint32_t[2]){batch_padded, 5120}, 2, FLOAT32);
     int k_proj = alloc_tensors_v2((uint32_t[2]){batch_padded, 1024}, 2, FLOAT32);
-    int v_proj = alloc_tensors_v2((uint32_t[2]){batch_padded, 5120}, 2, FLOAT32);
-    int q_proj_norm = alloc_tensors_v2((uint32_t[2]){batch_padded, 1024}, 2, FLOAT32);
+    int v_proj = alloc_tensors_v2((uint32_t[2]){batch_padded, 1024}, 2, FLOAT32);
+    int q_proj_norm = alloc_tensors_v2((uint32_t[2]){batch_padded, 5120}, 2, FLOAT32);
     int k_proj_norm = alloc_tensors_v2((uint32_t[2]){batch_padded, 1024}, 2, FLOAT32);
     for (int64_t b0 = 0; b0 < batch_padded; b0 += 16) {
         int t5 = alloc_tensors_v2((uint32_t[2]){16, 5120}, 2, BFLOAT16);

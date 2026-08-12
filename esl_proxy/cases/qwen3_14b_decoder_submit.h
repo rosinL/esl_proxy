@@ -136,6 +136,15 @@ after_pred:
     return true;
 }
 
+static inline bool tm_collect_remove_only(TmEntry *e, TmOverlap ov, void *ctx)
+{
+    SubmitCollectCtx *c = (SubmitCollectCtx *)ctx;
+    if (c->is_inout && ov == TM_OVERLAP_COVERED) {
+        tm_remove(c->map, e);
+    }
+    return true;
+}
+
 static inline int submit_owns(int tid, int thread_id)
 {
     int batch = tid / desc_batch_size;
@@ -171,7 +180,7 @@ void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt)
             for (int j = 0; j < desc->inout_cnt; j++) {
                 SubmitCollectCtx ctx = {.consumer = (uint32_t)tid, .pn = 0,
                                         .is_inout = true, .map = map};
-                tm_pt_lookup(map, &desc->inout_data[j], tm_collect_safe, &ctx);
+                tm_pt_lookup(map, &desc->inout_data[j], tm_collect_remove_only, &ctx);
             }
         }
 

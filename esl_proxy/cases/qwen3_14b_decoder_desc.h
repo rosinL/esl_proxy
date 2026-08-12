@@ -106,15 +106,14 @@ static inline void add_tensor_inout(uint16_t task_id, Tensor t)
  * Use __VA_ARGS__ to pass multi-statement blocks. */
 #define DESC_DO_OR_SKIP(task_id,...)                    \
     do {                                             \
+        while ((task_id) >= desc_end && desc_end < (1<<30)) {                         \
+                desc_end += (desc_batch_size * desc_thread_count);  \
+                desc_start += (desc_batch_size * desc_thread_count); \
+        }                                                    \
         if ((task_id) < desc_end && (task_id) >= desc_start) { \
             int __did = (task_id);                       \
             desc_created_cnt++;                      \
             __VA_ARGS__                              \
-        } else {          \
-            if ((task_id) >= desc_end) {                         \
-                desc_end += (desc_batch_size * desc_thread_count);  \
-                desc_start += (desc_batch_size * desc_thread_count); \
-            }                                                    \
         }                                \
         (task_id)++;                                     \
     } while (0)
@@ -263,8 +262,8 @@ int orchestrator_desc(const uint64_t orch_args, int thread_id, int *created_cnt)
 
         for (int base = 0; base < 4; base += qwen3_blocks_per_task(4)) {
             int cur_blocks = qwen3_cur_blocks(4, base);
+            Tensor row_piece = view(all_raw_scores, base * 1024u, 0u, (uint32_t)(cur_blocks * 1024), 128u);
             DESC_DO_OR_SKIP(desc_task_id,  {
-                Tensor row_piece = view(all_raw_scores, base * 1024u, 0u, (uint32_t)(cur_blocks * 1024), 128u);
                 new_task(__did, TASK_TYPE_CUBE, (uint32_t)cur_blocks, DUR_QK_MATMUL);
                 add_tensor_in(__did, q_padded_local);
                 add_tensor_out(__did, row_piece);
@@ -284,6 +283,7 @@ int orchestrator_desc(const uint64_t orch_args, int thread_id, int *created_cnt)
                 add_tensor_out(__did, cur_li_piece);
                 add_tensor_out(__did, cur_mi_piece);
                 add_tensor_out(__did, exp_padded_piece);
+                add_tensor_in(__did, row_piece);
                 add_scalar(__did, 8);    // (1024+127)/128: KV context blocks
                 add_scalar(__did, 1024); // context length (tokens)
                 add_scalar(__did, base);

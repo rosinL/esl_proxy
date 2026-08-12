@@ -99,21 +99,30 @@ static inline void unlock(int slotIdx)
 
 static int add_predecessors(uint32_t task_id, uint32_t target[], uint32_t n, uint32_t start)
 {
-    // int slotIdx = task_id & RING_MASK;
     int slotIdx = task_id;
     struct predecessor_list *ptr = &g_predecessors[slotIdx];
     int cnt = start;
-    if (ptr->cnt <= 0)
-        ptr->exp = atomic_load(&g_predecessor_ring.tail);
-    
+    bool need_exp = (ptr->cnt <= 0);
+
     uint32_t min_uncomplete_task = atomic_load_explicit(&g_min_uncomplete_task, memory_order_acquire);
     for (uint32_t i = 0; i < n; i++)
     {
         if (target[i] < min_uncomplete_task)
             continue;
         WORKER_LOGF("succeed,task_id,%u,predecessor_id,%u,idx,%d", task_id, target[i], cnt);
-        uint32_t* idx = atomic_fetch_add(&g_predecessor_ring.tail, 1);
-        *idx = target[i];
+        uint32_t *old_val = atomic_load_explicit(&g_predecessor_ring.tail, memory_order_acquire);
+        uint32_t *new_val;
+        do {
+            new_val = old_val + 1;
+        } while (!atomic_compare_exchange_weak_explicit(&g_predecessor_ring.tail,
+                                                          &old_val, new_val,
+                                                          memory_order_acq_rel,
+                                                          memory_order_acquire));
+        *old_val = target[i];
+        if (need_exp) {
+            ptr->exp = old_val;
+            need_exp = false;
+        }
         cnt++;
     }
     ptr->cnt = cnt;
