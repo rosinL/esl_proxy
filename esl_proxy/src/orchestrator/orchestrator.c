@@ -64,6 +64,8 @@ struct desc_thread_arg {
     int task_count;
     int created_cnt;
     uint64_t elapsed_ns;
+    uint64_t start_ns;
+    uint64_t end_ns;
     int core_id;
 };
 
@@ -72,6 +74,8 @@ struct submit_thread_arg {
     int total_tasks;
     int submit_cnt;
     uint64_t elapsed_ns;
+    uint64_t start_ns;
+    uint64_t end_ns;
     int core_id;
 };
 
@@ -102,10 +106,10 @@ static void *desc_thread_func(void *arg)
     struct desc_thread_arg *targ = (struct desc_thread_arg *)arg;
     pin_cpu(targ->core_id);
     pthread_barrier_wait(&g_phase_barrier);
-    uint64_t t0 = get_time_ns();
+    targ->start_ns = get_time_ns();
     targ->task_count = orc_desc_call(targ->orch_args, targ->thread_id, &targ->created_cnt);
-    uint64_t t1 = get_time_ns();
-    targ->elapsed_ns = t1 - t0;
+    targ->end_ns = get_time_ns();
+    targ->elapsed_ns = targ->end_ns - targ->start_ns;
     return NULL;
 }
 
@@ -113,10 +117,10 @@ static void *submit_thread_func(void *arg)
 {
     struct submit_thread_arg *targ = (struct submit_thread_arg *)arg;
     pin_cpu(targ->core_id);
-    uint64_t t0 = get_time_ns();
+    targ->start_ns = get_time_ns();
     orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt);
-    uint64_t t1 = get_time_ns();
-    targ->elapsed_ns = t1 - t0;
+    targ->end_ns = get_time_ns();
+    targ->elapsed_ns = targ->end_ns - targ->start_ns;
     return NULL;
 }
 
@@ -207,17 +211,17 @@ int main(int argc, char *argv[])
     pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count);
 
     for (int i = 0; i < desc_thread_count; i++) {
-        desc_args[i].orch_args = 0;
-        desc_args[i].thread_id = i;
-        desc_args[i].core_id = desc_cpu[i];
-        pthread_create(&desc_threads[i], NULL, desc_thread_func, &desc_args[i]);
-    }
-    for (int i = 0; i < desc_thread_count; i++) {
         submit_args[i].thread_id = i;
         submit_args[i].total_tasks = total_tasks;
         submit_args[i].submit_cnt = 0;
         submit_args[i].core_id = desc_cpu[i];
         pthread_create(&submit_threads[i], NULL, submit_thread_func, &submit_args[i]);
+    }
+    for (int i = 0; i < desc_thread_count; i++) {
+        desc_args[i].orch_args = 0;
+        desc_args[i].thread_id = i;
+        desc_args[i].core_id = desc_cpu[i];
+        pthread_create(&desc_threads[i], NULL, desc_thread_func, &desc_args[i]);
     }
 
     for (int i = 0; i < desc_thread_count; i++)
@@ -302,13 +306,21 @@ int main(int argc, char *argv[])
     printf("submit min throughput = %d / %llu ns = %.2f MTasks/s\n",
            total_tasks, (unsigned long long)submit_max_ns,
            submit_max_ns > 0 ? (double)total_tasks * 1000.0 / (double)submit_max_ns : 0.0);
-    printf("pipeline throughput = %d / max(%llu, %llu) ns = %.2f MTasks/s\n",
+
+    uint64_t pipeline_earliest = desc_args[0].start_ns;
+    uint64_t pipeline_latest = submit_args[0].end_ns;
+    for (int i = 1; i < desc_thread_count; i++) {
+        if (desc_args[i].start_ns < pipeline_earliest)
+            pipeline_earliest = desc_args[i].start_ns;
+        if (submit_args[i].end_ns > pipeline_latest)
+            pipeline_latest = submit_args[i].end_ns;
+    }
+    uint64_t pipeline_wall = pipeline_latest - pipeline_earliest;
+    printf("pipeline throughput = %d / (%llu - %llu) ns = %.2f MTasks/s\n",
            total_tasks,
-           (unsigned long long)desc_max_ns,
-           (unsigned long long)submit_max_ns,
-           (desc_max_ns > submit_max_ns ? desc_max_ns : submit_max_ns) > 0
-               ? (double)total_tasks * 1000.0 / (double)(desc_max_ns > submit_max_ns ? desc_max_ns : submit_max_ns)
-               : 0.0);
+           (unsigned long long)pipeline_latest,
+           (unsigned long long)pipeline_earliest,
+           pipeline_wall > 0 ? (double)total_tasks * 1000.0 / (double)pipeline_wall : 0.0);
 
     const char *dump_path = getenv("DEP_DUMP_PATH");
     if (dump_path && dump_path[0]) {
