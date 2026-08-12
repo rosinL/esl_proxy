@@ -147,6 +147,7 @@ int main(int argc, char *argv[])
     /* Print per-thread throughput: desc_task_id / execution_time (MTasks/s) */
     printf("desc_thread throughput (MTasks/s):\n");
     int total_cnt = 0;
+    uint64_t desc_max_ns = 0;
     for (int i = 0; i < desc_thread_count; i++) {
         /* throughput = tasks / us   (because MTasks/s = tasks / (us * 1e-6) * 1e-6 = tasks / us) */
         double throughput = (double)desc_args[i].task_count / (double)desc_args[i].elapsed_ns * (double)1000.0;
@@ -159,6 +160,8 @@ int main(int argc, char *argv[])
                throughput,
                time_240_us);
         total_cnt += desc_args[i].created_cnt;
+        if (desc_args[i].elapsed_ns > desc_max_ns)
+            desc_max_ns = desc_args[i].elapsed_ns;
     }
 
     int total_tasks = desc_args[0].task_count;
@@ -201,6 +204,7 @@ int main(int argc, char *argv[])
     /* Print submit phase throughput */
     printf("\nsubmit_thread throughput (MTasks/s):\n");
     int total_submit_cnt = 0;
+    uint64_t submit_max_ns = 0;
     for (int i = 0; i < desc_thread_count; i++) {
         double throughput = (double)submit_args[i].submit_cnt / (double)submit_args[i].elapsed_ns * (double)1000.0;
         printf("  thread %2d: submitted=%d  time=%llu ns  throughput=%.2f MTasks/s\n",
@@ -209,15 +213,26 @@ int main(int argc, char *argv[])
                (unsigned long long)submit_args[i].elapsed_ns,
                throughput);
         total_submit_cnt += submit_args[i].submit_cnt;
+        if (submit_args[i].elapsed_ns > submit_max_ns)
+            submit_max_ns = submit_args[i].elapsed_ns;
     }
 
     uint64_t submit_elapsed = end_ns - desc_end_ns;
     printf("\nphase timing:\n");
     printf("  alloc+desc phase: %llu ns\n", (unsigned long long)(desc_end_ns - start_ns));
     printf("  submit phase:     %llu ns\n", (unsigned long long)submit_elapsed);
+    printf("  desc max thread time:   %llu ns\n", (unsigned long long)desc_max_ns);
+    printf("  submit max thread time: %llu ns\n", (unsigned long long)submit_max_ns);
     printf("orchestrator total elapsed time (1 alloc + %d desc + %d submit threads): %llu ns\n",
            desc_thread_count, desc_thread_count, (unsigned long long)elapsed_ns);
     printf("desc=%d  submit=%d\n", total_cnt, total_submit_cnt);
+    printf("throughput = %d / (%llu + %llu) ns = %.2f MTasks/s\n",
+           total_tasks,
+           (unsigned long long)desc_max_ns,
+           (unsigned long long)submit_max_ns,
+           (desc_max_ns + submit_max_ns) > 0
+               ? (double)total_tasks * 1000.0 / (double)(desc_max_ns + submit_max_ns)
+               : 0.0);
 
     const char *dump_path = getenv("DEP_DUMP_PATH");
     if (dump_path && dump_path[0]) {
