@@ -4,7 +4,9 @@
 #define RING_SIZE 4096
 #define RING_MASK (RING_SIZE - 1)
 #define HALF_RING_SIZE 2048
+#ifndef NODE_BUFF_SIZE
 #define NODE_BUFF_SIZE 8192
+#endif
 
 // TODO: ERROR
 #define CON_NODE_CNT 32
@@ -29,7 +31,9 @@
 #endif
 
 /* 1: compile in worker logs; toggle at runtime via g_worker_log or WORKER_LOG env */
+#ifndef WORKER_LOG
 #define WORKER_LOG 1
+#endif
 
 /* 1: compile in main thread logs; output to screen only */
 #ifndef MAIN_LOG

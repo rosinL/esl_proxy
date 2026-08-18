@@ -112,8 +112,12 @@ static int add_predecessors(uint32_t task_id, uint32_t target[], uint32_t n, uin
         if (target[i] < min_uncomplete_task)
             continue;
         WORKER_LOGF("succeed,task_id,%u,predecessor_id,%u,idx,%d", task_id, target[i], cnt);
-        uint32_t* idx = atomic_fetch_add(&g_predecessor_ring.tail, 1);
-        *idx = target[i];
+        uint32_t *old_tail, *new_tail;
+        do {
+            old_tail = atomic_load(&g_predecessor_ring.tail);
+            new_tail = old_tail + 1;
+        } while (!atomic_compare_exchange_weak(&g_predecessor_ring.tail, &old_tail, new_tail));
+        *old_tail = target[i];
         cnt++;
     }
     ptr->cnt = cnt;

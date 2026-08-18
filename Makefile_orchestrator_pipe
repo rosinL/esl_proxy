@@ -1,0 +1,59 @@
+CC       := cc
+CFLAGS   := -g -std=c11 -Wall -Wextra -pedantic -O3 -D_GNU_SOURCE \
+            -I esl_proxy/include/algorithm -I esl_proxy/cases \
+            -MMD -MP -Wno-error=implicit-function-declaration \
+            -DQWEN3_SPMD_TIER=0 -DNODE_BUFF_SIZE=32768 \
+            -DWORKER_LOG=0 -DMAIN_LOG=0 -DLOG_OUTPUT_MODE=0 \
+            -DTMD_POOL_SIZE=2048 -DTMD_NUM_BUCKETS=512 -DTMD_TASK_WINDOW=1024 \
+            -funroll-loops -fno-stack-protector
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+    LDFLAGS := -lpthread -latomic
+else
+    LDFLAGS := -lpthread
+endif
+
+OBJ_DIR  := build/orchestrator_pipe
+TARGET   := bin/orchestrator_pipe
+TARGET_DUMP := bin/orchestrator_pipe_dump
+
+SRCS := \
+    esl_proxy/src/orchestrator/orchestrator_pipe.c \
+    esl_proxy/src/algorithm/log.c \
+    esl_proxy/src/algorithm/shm.c
+
+OBJS := $(patsubst esl_proxy/%.c,$(OBJ_DIR)/%.o,$(SRCS))
+
+DUMP_OBJS := $(patsubst esl_proxy/%.c,$(OBJ_DIR)/dump/%.o,$(SRCS))
+
+.PHONY: all clean run run-dump
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	@mkdir -p bin
+	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+
+$(OBJ_DIR)/%.o: esl_proxy/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(TARGET_DUMP): $(DUMP_OBJS)
+	@mkdir -p bin
+	$(CC) $(DUMP_OBJS) -o $@ $(LDFLAGS)
+
+$(OBJ_DIR)/dump/%.o: esl_proxy/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DDAG_DUMP -c $< -o $@
+
+run: $(TARGET)
+	./$(TARGET)
+
+run-dump: $(TARGET_DUMP)
+	./$(TARGET_DUMP)
+
+clean:
+	rm -rf $(OBJ_DIR) $(TARGET) $(TARGET_DUMP)
+
+-include $(OBJS:.o=.d) $(DUMP_OBJS:.o=.d)

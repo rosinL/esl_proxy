@@ -63,17 +63,12 @@ extern mem_pool_t g_mem_pool;
  */
 static inline void *mem_pool_alloc(mem_pool_t *pool, size_t size)
 {
-    uintptr_t tail = atomic_load_explicit(&pool->tail, memory_order_relaxed);
-    uintptr_t new_tail = tail + size;
-
-    /* Check if enough space (without wrap for simplicity) */
-    if (new_tail > (uintptr_t)pool->base + pool->size) {
+    uintptr_t tail = atomic_fetch_add_explicit(&pool->tail, (uintptr_t)size,
+                                                memory_order_relaxed);
+    if (tail + size > (uintptr_t)pool->base + pool->size) {
         return NULL;
     }
-
-    void *result = (void *)tail;
-    atomic_store_explicit(&pool->tail, new_tail, memory_order_release);
-    return result;
+    return (void *)tail;
 }
 
 static inline Tensor alloc_tensors(uint32_t shape[], int dim, int bytes)
