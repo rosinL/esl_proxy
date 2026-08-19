@@ -56,7 +56,8 @@ void orc_alloc_call(uint64_t orch_args);
 int orc_desc_call(uint64_t orch_args, int thread_id, int *created_cnt);
 void orc_submit_init(int thread_count);
 void orc_submit_cleanup(void);
-int orc_submit_call(int thread_id, int total_tasks, int *submit_cnt);
+int orc_submit_call(int thread_id, int total_tasks, int *submit_cnt,
+                    uint64_t *spin_ns, uint64_t *compute_ns, uint64_t *spin_count);
 
 struct desc_thread_arg {
     uint64_t orch_args;
@@ -76,6 +77,9 @@ struct submit_thread_arg {
     uint64_t elapsed_ns;
     uint64_t start_ns;
     uint64_t end_ns;
+    uint64_t spin_ns;
+    uint64_t compute_ns;
+    uint64_t spin_count;
     int core_id;
 };
 
@@ -126,7 +130,8 @@ static void *submit_thread_func(void *arg)
     pin_cpu(targ->core_id);
     pthread_barrier_wait(&g_phase_barrier);
     targ->start_ns = get_time_ns();
-    orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt);
+    orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt,
+                    &targ->spin_ns, &targ->compute_ns, &targ->spin_count);
     targ->end_ns = get_time_ns();
     targ->elapsed_ns = targ->end_ns - targ->start_ns;
     atomic_fetch_add_explicit(&g_pipeline_done_cnt, 1, memory_order_release);
@@ -162,26 +167,34 @@ static void parse_cpu_range(const char *spec, int *out, int max_count)
 int main(int argc, char *argv[])
 {
     int desc_cpu[256];
+    int submit_cpu[256];
     parse_cpu_range(NULL, desc_cpu, 0);
+    parse_cpu_range(NULL, submit_cpu, 0);
 
-    /* Usage: orchestrator [thread_count] [cpu_range] */
+    /* Usage: orchestrator [thread_count] [desc_cpu] [submit_cpu] [batch_size] */
     if (argc >= 2) {
         desc_thread_count = atoi(argv[1]);
         if (desc_thread_count <= 0) {
             fprintf(stderr,
-                "Usage: %s [thread_count] [cpu_range]\n"
-                "  cpu_range: e.g. 0-7 or 0,2,4,6 or 0-3,8-11 (shared by desc+submit)\n"
-                "  omit cpu_range for no pinning\n",
+                "Usage: %s [thread_count] [desc_cpu] [submit_cpu] [batch_size]\n"
+                "  desc_cpu:   e.g. 0-7 (desc threads)\n"
+                "  submit_cpu: e.g. 8-15 (submit threads, separate from desc)\n"
+                "  batch_size: tasks per batch (default 32)\n"
+                "  omit cpu ranges for no pinning\n",
                 argv[0]);
             return 1;
         }
     }
     if (argc >= 3)
         parse_cpu_range(argv[2], desc_cpu, desc_thread_count);
+    if (argc >= 4)
+        parse_cpu_range(argv[3], submit_cpu, desc_thread_count);
+    if (argc >= 5)
+        desc_batch_size = atoi(argv[4]);
 
     int has_pin = (argc >= 3);
-    printf("threads=%d  cpu_pin=%s\n",
-           desc_thread_count, has_pin ? "yes" : "no");
+    printf("threads=%d  batch=%d  cpu_pin=%s\n",
+           desc_thread_count, desc_batch_size, has_pin ? "yes" : "no");
 
     pthread_t alloc_thread;
     pthread_t *desc_threads = malloc((size_t)desc_thread_count * sizeof(pthread_t));
@@ -210,7 +223,7 @@ int main(int argc, char *argv[])
         submit_args[i].thread_id = i;
         submit_args[i].total_tasks = 0;
         submit_args[i].submit_cnt = 0;
-        submit_args[i].core_id = desc_cpu[i];
+        submit_args[i].core_id = submit_cpu[i];
         pthread_create(&submit_threads[i], NULL, submit_thread_func, &submit_args[i]);
     }
     for (int i = 0; i < desc_thread_count; i++) {
@@ -233,8 +246,10 @@ int main(int argc, char *argv[])
     int total_tasks = (int)alloc_task_id;
 
     /* Init ready flags for pipeline */
-    for (int i = 0; i < RING_SIZE; i++)
+    for (int i = 0; i < RING_SIZE; i++) {
         atomic_store(&g_task_ready[i], 0);
+        atomic_store(&g_batch_ready[i].val, 0);
+    }
     orc_submit_init(desc_thread_count);
 
     /* Set total_tasks in submit args (safe: threads wait at barrier) */
@@ -296,10 +311,13 @@ int main(int argc, char *argv[])
     uint64_t submit_sum_ns = 0;
     for (int i = 0; i < desc_thread_count; i++) {
         double throughput = (double)submit_args[i].submit_cnt / (double)submit_args[i].elapsed_ns * (double)1000.0;
-        printf("  thread %2d: submitted=%d  time=%llu ns  throughput=%.2f MTasks/s\n",
+        printf("  thread %2d: submitted=%d  time=%llu ns (spin=%llu  compute=%llu  spin_cnt=%llu)  throughput=%.2f MTasks/s\n",
                submit_args[i].thread_id,
                submit_args[i].submit_cnt,
                (unsigned long long)submit_args[i].elapsed_ns,
+               (unsigned long long)submit_args[i].spin_ns,
+               (unsigned long long)submit_args[i].compute_ns,
+               (unsigned long long)submit_args[i].spin_count,
                throughput);
         total_submit_cnt += submit_args[i].submit_cnt;
         if (submit_args[i].elapsed_ns > submit_max_ns)

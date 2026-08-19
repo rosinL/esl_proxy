@@ -43,6 +43,8 @@ extern ctrl_t g_ctrl_t[DISPATCH_THREAD_CNT];
 
 extern int g_subtask_cnt;
 extern atomic_int g_task_ready[RING_SIZE];
+struct batch_ready_t { atomic_int val; char _pad[60]; };
+extern struct batch_ready_t g_batch_ready[RING_SIZE];
 
 struct ring_buf {
     uint32_t size;

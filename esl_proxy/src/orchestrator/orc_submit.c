@@ -22,8 +22,9 @@ void orc_submit_cleanup(void)
 {
 }
 
-int orc_submit_call(int thread_id, int total_tasks, int *submit_cnt)
+int orc_submit_call(int thread_id, int total_tasks, int *submit_cnt,
+                    uint64_t *spin_ns, uint64_t *compute_ns, uint64_t *spin_count)
 {
-    orchestrator_submit(thread_id, total_tasks, submit_cnt);
+    orchestrator_submit(thread_id, total_tasks, submit_cnt, spin_ns, compute_ns, spin_count);
     return *submit_cnt;
 }

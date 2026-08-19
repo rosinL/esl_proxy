@@ -106,7 +106,8 @@ static inline void add_tensor_inout(uint16_t task_id, Tensor t)
  * Use __VA_ARGS__ to pass multi-statement blocks. */
 #define DESC_DO_OR_SKIP(task_id,...)                    \
     do {                                             \
-        while ((task_id) >= desc_end && desc_end < (1<<30)) {                         \
+        if ((task_id) >= desc_end && desc_end < (1<<30)) {                         \
+                atomic_store_explicit(&g_batch_ready[(desc_start / desc_batch_size) & RING_MASK].val, 1, memory_order_release); \
                 desc_end += (desc_batch_size * desc_thread_count);  \
                 desc_start += (desc_batch_size * desc_thread_count); \
         }                                                    \
@@ -114,7 +115,6 @@ static inline void add_tensor_inout(uint16_t task_id, Tensor t)
             int __did = (task_id);                       \
             desc_created_cnt++;                      \
             __VA_ARGS__                              \
-            atomic_store_explicit(&g_task_ready[__did & RING_MASK], 1, memory_order_release); \
         }                                \
         (task_id)++;                                     \
     } while (0)
@@ -404,5 +404,6 @@ int orchestrator_desc(const uint64_t orch_args, int thread_id, int *created_cnt)
         }
     }
     *created_cnt = desc_created_cnt;
+    atomic_store_explicit(&g_batch_ready[(desc_start / desc_batch_size) & RING_MASK].val, 1, memory_order_release);
     return desc_task_id;
 }

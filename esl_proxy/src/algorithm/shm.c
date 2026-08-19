@@ -40,4 +40,5 @@ void init_predecessors(void)
 }
 
 atomic_int g_task_ready[RING_SIZE];
+struct batch_ready_t g_batch_ready[RING_SIZE];
 

@@ -152,50 +152,72 @@ static inline int submit_owns(int tid, int thread_id)
     return (batch % desc_thread_count) == thread_id;
 }
 
-void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt)
+void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt,
+                         uint64_t *spin_ns, uint64_t *compute_ns, uint64_t *spin_count)
 {
     TmTensorMap *map = &g_tm_pt[thread_id].map;
     int n_owned = 0;
+    int n_batches = (total_tasks + desc_batch_size - 1) / desc_batch_size;
+    uint64_t spin_total = 0;
+    uint64_t compute_total = 0;
+    uint64_t spins = 0;
 
-    for (int tid = 0; tid < total_tasks; tid++) {
-        while (!atomic_load_explicit(&g_task_ready[(uint32_t)tid & RING_MASK],
+    for (int batch = 0; batch < n_batches; batch++) {
+        uint64_t t0 = get_time_ns();
+        while (!atomic_load_explicit(&g_batch_ready[(uint32_t)batch & RING_MASK].val,
                                      memory_order_acquire)) {
-            sched_yield();
+            for (int i = 0; i < 1024; i++)
+                spin_wait();
+            spins++;
         }
-        const struct task_tensor_desc *desc = &g_task_tensor_buf[(uint32_t)tid & RING_MASK];
-        bool is_owned = submit_owns(tid, thread_id);
+        uint64_t t1 = get_time_ns();
+        spin_total += t1 - t0;
 
-        if (is_owned) {
-            n_owned++;
-            SubmitCollectCtx ctx = {.consumer = (uint32_t)tid, .pn = 0, .map = map};
+        int batch_start = batch * desc_batch_size;
+        int batch_end = batch_start + desc_batch_size;
+        if (batch_end > total_tasks) batch_end = total_tasks;
 
-            for (int j = 0; j < desc->in_cnt; j++) {
-                ctx.is_inout = false;
-                tm_pt_lookup(map, &desc->in_data[j], tm_collect_safe, &ctx);
+        for (int tid = batch_start; tid < batch_end; tid++) {
+            const struct task_tensor_desc *desc = &g_task_tensor_buf[(uint32_t)tid & RING_MASK];
+            bool is_owned = submit_owns(tid, thread_id);
+
+            if (is_owned) {
+                n_owned++;
+                SubmitCollectCtx ctx = {.consumer = (uint32_t)tid, .pn = 0, .map = map};
+
+                for (int j = 0; j < desc->in_cnt; j++) {
+                    ctx.is_inout = false;
+                    tm_pt_lookup(map, &desc->in_data[j], tm_collect_safe, &ctx);
+                }
+                for (int j = 0; j < desc->inout_cnt; j++) {
+                    ctx.is_inout = true;
+                    tm_pt_lookup(map, &desc->inout_data[j], tm_collect_safe, &ctx);
+                }
+
+                if (ctx.pn > 0) {
+                    add_predecessors((uint32_t)tid, ctx.preds, (uint32_t)ctx.pn, 0);
+                }
+            } else {
+                for (int j = 0; j < desc->inout_cnt; j++) {
+                    SubmitCollectCtx ctx = {.consumer = (uint32_t)tid, .pn = 0,
+                                            .is_inout = true, .map = map};
+                    tm_pt_lookup(map, &desc->inout_data[j], tm_collect_remove_only, &ctx);
+                }
+            }
+
+            for (int j = 0; j < desc->out_cnt; j++) {
+                tm_pt_insert(map, &desc->out_data[j], (uint32_t)tid);
             }
             for (int j = 0; j < desc->inout_cnt; j++) {
-                ctx.is_inout = true;
-                tm_pt_lookup(map, &desc->inout_data[j], tm_collect_safe, &ctx);
-            }
-
-            if (ctx.pn > 0) {
-                add_predecessors((uint32_t)tid, ctx.preds, (uint32_t)ctx.pn, 0);
-            }
-        } else {
-            for (int j = 0; j < desc->inout_cnt; j++) {
-                SubmitCollectCtx ctx = {.consumer = (uint32_t)tid, .pn = 0,
-                                        .is_inout = true, .map = map};
-                tm_pt_lookup(map, &desc->inout_data[j], tm_collect_remove_only, &ctx);
+                tm_pt_insert(map, &desc->inout_data[j], (uint32_t)tid);
             }
         }
-
-        for (int j = 0; j < desc->out_cnt; j++) {
-            tm_pt_insert(map, &desc->out_data[j], (uint32_t)tid);
-        }
-        for (int j = 0; j < desc->inout_cnt; j++) {
-            tm_pt_insert(map, &desc->inout_data[j], (uint32_t)tid);
-        }
+        uint64_t t2 = get_time_ns();
+        compute_total += t2 - t1;
     }
 
     *submit_cnt = n_owned;
+    *spin_ns = spin_total;
+    *compute_ns = compute_total;
+    *spin_count = spins;
 }
