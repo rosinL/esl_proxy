@@ -84,6 +84,10 @@ int desc_batch_size = 32;
 
 static pthread_barrier_t g_phase_barrier;
 
+static atomic_bool g_alloc_start = false;
+static atomic_bool g_alloc_done = false;
+static atomic_int g_pipeline_done_cnt = 0;
+
 static void pin_cpu(int core_id)
 {
     if (core_id < 0)
@@ -97,7 +101,9 @@ static void pin_cpu(int core_id)
 static void *alloc_thread_func(void *arg)
 {
     uint64_t orch_args = (uint64_t)(uintptr_t)arg;
+    while (!atomic_load_explicit(&g_alloc_start, memory_order_acquire)) {}
     orc_alloc_call(orch_args);
+    atomic_store_explicit(&g_alloc_done, true, memory_order_release);
     return NULL;
 }
 
@@ -110,6 +116,7 @@ static void *desc_thread_func(void *arg)
     targ->task_count = orc_desc_call(targ->orch_args, targ->thread_id, &targ->created_cnt);
     targ->end_ns = get_time_ns();
     targ->elapsed_ns = targ->end_ns - targ->start_ns;
+    atomic_fetch_add_explicit(&g_pipeline_done_cnt, 1, memory_order_release);
     return NULL;
 }
 
@@ -122,6 +129,7 @@ static void *submit_thread_func(void *arg)
     orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt);
     targ->end_ns = get_time_ns();
     targ->elapsed_ns = targ->end_ns - targ->start_ns;
+    atomic_fetch_add_explicit(&g_pipeline_done_cnt, 1, memory_order_release);
     return NULL;
 }
 
@@ -182,23 +190,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    uint64_t start_ns, end_ns, elapsed_ns;
-    start_ns = get_time_ns();
-
-    /* 1 orchestrator_alloc thread */
-    pthread_create(&alloc_thread, NULL, alloc_thread_func, (void *)(uintptr_t)0);
-    pthread_join(alloc_thread, NULL);
-
-    int total_tasks = (int)alloc_task_id;
-
-    /* Init ready flags for pipeline */
-    for (int i = 0; i < RING_SIZE; i++)
-        atomic_store(&g_task_ready[i], 0);
-    orc_submit_init(desc_thread_count);
-
-    /* 2: desc + submit threads start together (pipeline)
-     * desc fills g_task_tensor_buf[tid] and sets g_task_ready[tid]
-     * submit spins on g_task_ready[tid] then processes */
     struct desc_thread_arg *desc_args = malloc((size_t)desc_thread_count * sizeof(struct desc_thread_arg));
     struct submit_thread_arg *submit_args = malloc((size_t)desc_thread_count * sizeof(struct submit_thread_arg));
     pthread_t *submit_threads = malloc((size_t)desc_thread_count * sizeof(pthread_t));
@@ -209,11 +200,15 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count * 2);
+    /* Barrier includes main so it can release desc+submit after alloc done */
+    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count * 2 + 1);
+
+    /* Pre-create all threads (creation time excluded from timing) */
+    pthread_create(&alloc_thread, NULL, alloc_thread_func, (void *)(uintptr_t)0);
 
     for (int i = 0; i < desc_thread_count; i++) {
         submit_args[i].thread_id = i;
-        submit_args[i].total_tasks = total_tasks;
+        submit_args[i].total_tasks = 0;
         submit_args[i].submit_cnt = 0;
         submit_args[i].core_id = desc_cpu[i];
         pthread_create(&submit_threads[i], NULL, submit_thread_func, &submit_args[i]);
@@ -225,6 +220,42 @@ int main(int argc, char *argv[])
         pthread_create(&desc_threads[i], NULL, desc_thread_func, &desc_args[i]);
     }
 
+    /* All threads created — start timing */
+    uint64_t start_ns, end_ns, elapsed_ns;
+    start_ns = get_time_ns();
+
+    /* Signal alloc thread to start */
+    atomic_store_explicit(&g_alloc_start, true, memory_order_release);
+
+    /* Wait for alloc to complete */
+    while (!atomic_load_explicit(&g_alloc_done, memory_order_acquire)) {}
+
+    int total_tasks = (int)alloc_task_id;
+
+    /* Init ready flags for pipeline */
+    for (int i = 0; i < RING_SIZE; i++)
+        atomic_store(&g_task_ready[i], 0);
+    orc_submit_init(desc_thread_count);
+
+    /* Set total_tasks in submit args (safe: threads wait at barrier) */
+    for (int i = 0; i < desc_thread_count; i++)
+        submit_args[i].total_tasks = total_tasks;
+
+    /* Release barrier — desc + submit threads start together (pipeline)
+     * desc fills g_task_tensor_buf[tid] and sets g_task_ready[tid]
+     * submit spins on g_task_ready[tid] then processes */
+    pthread_barrier_wait(&g_phase_barrier);
+
+    /* Wait for all desc+submit threads to complete */
+    while (atomic_load_explicit(&g_pipeline_done_cnt, memory_order_acquire)
+           < desc_thread_count * 2) {}
+
+    /* Stop timing (before join — destruction time excluded) */
+    end_ns = get_time_ns();
+    elapsed_ns = end_ns - start_ns;
+
+    /* Join all threads (destruction time excluded from timing) */
+    pthread_join(alloc_thread, NULL);
     for (int i = 0; i < desc_thread_count; i++)
         pthread_join(desc_threads[i], NULL);
     for (int i = 0; i < desc_thread_count; i++)
@@ -232,8 +263,6 @@ int main(int argc, char *argv[])
 
     pthread_barrier_destroy(&g_phase_barrier);
     orc_submit_cleanup();
-
-    uint64_t desc_end_ns = get_time_ns();
 
     /* Print per-thread throughput: desc_task_id / execution_time (MTasks/s) */
     printf("desc_thread throughput (MTasks/s):\n");
@@ -279,9 +308,6 @@ int main(int argc, char *argv[])
             submit_min_ns = submit_args[i].elapsed_ns;
         submit_sum_ns += submit_args[i].elapsed_ns;
     }
-
-    end_ns = get_time_ns();
-    elapsed_ns = end_ns - start_ns;
 
     double desc_avg_ns = (double)desc_sum_ns / desc_thread_count;
     double submit_avg_ns = (double)submit_sum_ns / desc_thread_count;
