@@ -18,6 +18,7 @@
 extern uint32_t alloc_task_id;
 extern struct predecessor_list g_predecessors[];
 extern uint64_t g_submit_wait_map[SUBMIT_MAX_THREADS][SUBMIT_MAX_BATCHES];
+extern uint64_t g_submit_handoff_map[SUBMIT_MAX_THREADS][SUBMIT_MAX_BATCHES];
 extern int g_submit_n_batches;
 
 static int dump_predecessors(const char *path, int total_task_cnt)
@@ -390,6 +391,24 @@ int main(int argc, char *argv[])
             if (w > max_wait) max_wait = w;
         }
         printf("  %8llu", (unsigned long long)(max_wait / 1000));
+        printf("\n");
+    }
+
+    printf("\nsubmit per-batch handoff (us), desc set_flag → submit detected:\n");
+    printf("  batch  owner ");
+    for (int t = 0; t < desc_thread_count; t++)
+        printf(" %7d", t);
+    printf("  %8s\n", "max");
+    for (int b = 0; b < n_batches; b++) {
+        int owner = b % desc_thread_count;
+        uint64_t max_h = 0;
+        printf("  %5d  %5d ", b, owner);
+        for (int t = 0; t < desc_thread_count; t++) {
+            uint64_t h = g_submit_handoff_map[t][b];
+            printf(" %7llu", (unsigned long long)(h / 1000));
+            if (h > max_h) max_h = h;
+        }
+        printf("  %8llu", (unsigned long long)(max_h / 1000));
         printf("\n");
     }
 

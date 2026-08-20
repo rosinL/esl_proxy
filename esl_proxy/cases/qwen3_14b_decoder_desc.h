@@ -35,6 +35,7 @@
 
 int g_subtask_cnt = 0;
 struct task_tensor_desc g_task_tensor_buf[RING_SIZE];
+uint64_t g_batch_ready_time[RING_SIZE];
 
 static inline int qwen3_min_i(int a, int b) {
     return a < b ? a : b;
@@ -107,6 +108,7 @@ static inline void add_tensor_inout(uint16_t task_id, Tensor t)
 #define DESC_DO_OR_SKIP(task_id,...)                    \
     do {                                             \
         if ((task_id) >= desc_end && desc_end < (1<<30)) {                         \
+                g_batch_ready_time[(desc_start / desc_batch_size) & RING_MASK] = get_time_ns(); \
                 atomic_store_explicit(&g_batch_ready[(desc_start / desc_batch_size) & RING_MASK].val, 1, memory_order_release); \
                 desc_end += (desc_batch_size * desc_thread_count);  \
                 desc_start += (desc_batch_size * desc_thread_count); \
@@ -404,6 +406,7 @@ int orchestrator_desc(const uint64_t orch_args, int thread_id, int *created_cnt)
         }
     }
     *created_cnt = desc_created_cnt;
+    g_batch_ready_time[(desc_start / desc_batch_size) & RING_MASK] = get_time_ns();
     atomic_store_explicit(&g_batch_ready[(desc_start / desc_batch_size) & RING_MASK].val, 1, memory_order_release);
     return desc_task_id;
 }

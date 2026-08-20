@@ -149,8 +149,10 @@ static inline int submit_owns(int tid, int thread_id)
 }
 
 extern int g_submit_n_batches;
+extern uint64_t g_batch_ready_time[RING_SIZE];
 
 uint64_t g_submit_wait_map[SUBMIT_MAX_THREADS][SUBMIT_MAX_BATCHES];
+uint64_t g_submit_handoff_map[SUBMIT_MAX_THREADS][SUBMIT_MAX_BATCHES];
 int g_submit_n_batches = 0;
 
 void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt,
@@ -163,9 +165,12 @@ void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt,
     uint64_t compute_total = 0;
     uint64_t spins = 0;
     uint64_t *wait_map = g_submit_wait_map[thread_id];
+    uint64_t *handoff_map = g_submit_handoff_map[thread_id];
 
-    for (int batch = 0; batch < n_batches && batch < SUBMIT_MAX_BATCHES; batch++)
+    for (int batch = 0; batch < n_batches && batch < SUBMIT_MAX_BATCHES; batch++) {
         wait_map[batch] = 0;
+        handoff_map[batch] = 0;
+    }
 
     for (int batch = 0; batch < n_batches; batch++) {
         uint64_t t0 = get_time_ns();
@@ -178,8 +183,11 @@ void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt,
         uint64_t t1 = get_time_ns();
         uint64_t wait_ns = t1 - t0;
         spin_total += wait_ns;
-        if (batch < SUBMIT_MAX_BATCHES)
+        if (batch < SUBMIT_MAX_BATCHES) {
             wait_map[batch] = wait_ns;
+            uint64_t ready_ts = g_batch_ready_time[(uint32_t)batch & RING_MASK];
+            handoff_map[batch] = (t1 > ready_ts) ? (t1 - ready_ts) : 0;
+        }
 
         int batch_start = batch * desc_batch_size;
         int batch_end = batch_start + desc_batch_size;
