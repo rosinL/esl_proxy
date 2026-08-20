@@ -226,12 +226,6 @@ int main(int argc, char *argv[])
             return 1;
         }
     }
-    if (argc >= 3)
-        parse_cpu_range(argv[2], desc_cpu, desc_thread_count);
-    if (argc >= 4)
-        parse_cpu_range(argv[3], submit_cpu, submit_thread_count > 0 ? submit_thread_count : desc_thread_count);
-    if (argc >= 5)
-        desc_batch_size = atoi(argv[4]);
     if (argc >= 6) {
         submit_thread_count = atoi(argv[5]);
         if (submit_thread_count <= 0)
@@ -239,6 +233,12 @@ int main(int argc, char *argv[])
     } else {
         submit_thread_count = desc_thread_count;
     }
+    if (argc >= 3)
+        parse_cpu_range(argv[2], desc_cpu, desc_thread_count);
+    if (argc >= 4)
+        parse_cpu_range(argv[3], submit_cpu, submit_thread_count);
+    if (argc >= 5)
+        desc_batch_size = atoi(argv[4]);
 
     int has_pin = (argc >= 3);
     printf("desc_threads=%d  submit_threads=%d  batch=%d  cpu_pin=%s\n",
