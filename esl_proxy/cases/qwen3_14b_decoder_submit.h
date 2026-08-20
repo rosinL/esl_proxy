@@ -22,6 +22,7 @@
 
 extern struct task_tensor_desc g_task_tensor_buf[RING_SIZE];
 extern int desc_thread_count;
+extern int submit_thread_count;
 extern int desc_batch_size;
 
 #ifndef TM_PT_POOL_SIZE
@@ -145,7 +146,7 @@ static inline bool tm_collect_remove_only(TmEntry *e, TmOverlap ov, void *ctx)
 static inline int submit_owns(int tid, int thread_id)
 {
     int batch = tid / desc_batch_size;
-    return (batch % desc_thread_count) == thread_id;
+    return (batch % submit_thread_count) == thread_id;
 }
 
 extern int g_submit_n_batches;
