@@ -94,6 +94,7 @@ struct submit_thread_arg {
 };
 
 int desc_thread_count = DESC_THREAD_COUNT;
+int submit_thread_count = DESC_THREAD_COUNT;
 int desc_batch_size = 32;
 
 static pthread_barrier_t g_phase_barrier;
@@ -209,30 +210,39 @@ int main(int argc, char *argv[])
     parse_cpu_range(NULL, desc_cpu, 0);
     parse_cpu_range(NULL, submit_cpu, 0);
 
-    /* Usage: orchestrator [thread_count] [desc_cpu] [submit_cpu] [batch_size] */
+    /* Usage: orchestrator [desc_threads] [desc_cpu] [submit_cpu] [batch_size] [submit_threads] */
     if (argc >= 2) {
         desc_thread_count = atoi(argv[1]);
         if (desc_thread_count <= 0) {
             fprintf(stderr,
-                "Usage: %s [thread_count] [desc_cpu] [submit_cpu] [batch_size]\n"
-                "  desc_cpu:   e.g. 0-7 (desc threads)\n"
-                "  submit_cpu: e.g. 8-15 (submit threads, separate from desc)\n"
-                "  batch_size: tasks per batch (default 32)\n"
+                "Usage: %s [desc_threads] [desc_cpu] [submit_cpu] [batch_size] [submit_threads]\n"
+                "  desc_threads:   number of desc threads (default %d)\n"
+                "  desc_cpu:       e.g. 0-7 (desc threads)\n"
+                "  submit_cpu:     e.g. 8-15 (submit threads, separate from desc)\n"
+                "  batch_size:     tasks per batch (default 32)\n"
+                "  submit_threads: number of submit threads (default = desc_threads)\n"
                 "  omit cpu ranges for no pinning\n",
-                argv[0]);
+                argv[0], DESC_THREAD_COUNT);
             return 1;
         }
     }
     if (argc >= 3)
         parse_cpu_range(argv[2], desc_cpu, desc_thread_count);
     if (argc >= 4)
-        parse_cpu_range(argv[3], submit_cpu, desc_thread_count);
+        parse_cpu_range(argv[3], submit_cpu, submit_thread_count > 0 ? submit_thread_count : desc_thread_count);
     if (argc >= 5)
         desc_batch_size = atoi(argv[4]);
+    if (argc >= 6) {
+        submit_thread_count = atoi(argv[5]);
+        if (submit_thread_count <= 0)
+            submit_thread_count = desc_thread_count;
+    } else {
+        submit_thread_count = desc_thread_count;
+    }
 
     int has_pin = (argc >= 3);
-    printf("threads=%d  batch=%d  cpu_pin=%s\n",
-           desc_thread_count, desc_batch_size, has_pin ? "yes" : "no");
+    printf("desc_threads=%d  submit_threads=%d  batch=%d  cpu_pin=%s\n",
+           desc_thread_count, submit_thread_count, desc_batch_size, has_pin ? "yes" : "no");
 
     pthread_t alloc_thread;
     pthread_t *desc_threads = malloc((size_t)desc_thread_count * sizeof(pthread_t));
@@ -242,8 +252,8 @@ int main(int argc, char *argv[])
     }
 
     struct desc_thread_arg *desc_args = malloc((size_t)desc_thread_count * sizeof(struct desc_thread_arg));
-    struct submit_thread_arg *submit_args = malloc((size_t)desc_thread_count * sizeof(struct submit_thread_arg));
-    pthread_t *submit_threads = malloc((size_t)desc_thread_count * sizeof(pthread_t));
+    struct submit_thread_arg *submit_args = malloc((size_t)submit_thread_count * sizeof(struct submit_thread_arg));
+    pthread_t *submit_threads = malloc((size_t)submit_thread_count * sizeof(pthread_t));
     if (!desc_args || !submit_args || !submit_threads) {
         fprintf(stderr, "Failed to allocate thread arrays\n");
         free(desc_args); free(submit_args); free(submit_threads);
@@ -252,12 +262,12 @@ int main(int argc, char *argv[])
     }
 
     /* Barrier includes main so it can release desc+submit after alloc done */
-    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count * 2 + 1);
+    pthread_barrier_init(&g_phase_barrier, NULL, desc_thread_count + submit_thread_count + 1);
 
     /* Pre-create all threads (creation time excluded from timing) */
     pthread_create(&alloc_thread, NULL, alloc_thread_func, (void *)(uintptr_t)0);
 
-    for (int i = 0; i < desc_thread_count; i++) {
+    for (int i = 0; i < submit_thread_count; i++) {
         submit_args[i].thread_id = i;
         submit_args[i].total_tasks = 0;
         submit_args[i].submit_cnt = 0;
@@ -288,10 +298,10 @@ int main(int argc, char *argv[])
         atomic_store(&g_task_ready[i], 0);
         atomic_store(&g_batch_ready[i].val, 0);
     }
-    orc_submit_init(desc_thread_count);
+    orc_submit_init(submit_thread_count);
 
     /* Set total_tasks in submit args (safe: threads wait at barrier) */
-    for (int i = 0; i < desc_thread_count; i++)
+    for (int i = 0; i < submit_thread_count; i++)
         submit_args[i].total_tasks = total_tasks;
 
     /* Release barrier — desc + submit threads start together (pipeline)
@@ -301,7 +311,7 @@ int main(int argc, char *argv[])
 
     /* Wait for all desc+submit threads to complete */
     while (atomic_load_explicit(&g_pipeline_done_cnt, memory_order_acquire)
-           < desc_thread_count * 2) {}
+           < desc_thread_count + submit_thread_count) {}
 
     /* Stop timing (before join — destruction time excluded) */
     end_ns = get_time_ns();
@@ -311,7 +321,7 @@ int main(int argc, char *argv[])
     pthread_join(alloc_thread, NULL);
     for (int i = 0; i < desc_thread_count; i++)
         pthread_join(desc_threads[i], NULL);
-    for (int i = 0; i < desc_thread_count; i++)
+    for (int i = 0; i < submit_thread_count; i++)
         pthread_join(submit_threads[i], NULL);
 
     pthread_barrier_destroy(&g_phase_barrier);
@@ -349,7 +359,7 @@ int main(int argc, char *argv[])
     uint64_t submit_max_ns = 0;
     uint64_t submit_min_ns = ~(0ULL);
     uint64_t submit_sum_ns = 0;
-    for (int i = 0; i < desc_thread_count; i++) {
+    for (int i = 0; i < submit_thread_count; i++) {
         double throughput = (double)submit_args[i].submit_cnt / (double)submit_args[i].elapsed_ns * (double)1000.0;
         printf("  thread %2d: submitted=%d  time=%llu ns (spin=%llu  compute=%llu  spin_cnt=%llu)  throughput=%.2f MTasks/s  ctxt=%ld(vol)+%ld(inv)\n",
                submit_args[i].thread_id,
@@ -370,22 +380,22 @@ int main(int argc, char *argv[])
     }
 
     double desc_avg_ns = (double)desc_sum_ns / desc_thread_count;
-    double submit_avg_ns = (double)submit_sum_ns / desc_thread_count;
+    double submit_avg_ns = (double)submit_sum_ns / submit_thread_count;
 
     int n_batches = (total_tasks + desc_batch_size - 1) / desc_batch_size;
     if (n_batches > SUBMIT_MAX_BATCHES) n_batches = SUBMIT_MAX_BATCHES;
     g_submit_n_batches = n_batches;
 
-    printf("\nsubmit per-batch wait (us), batch=0..%d (owner=batch%%threads):\n", n_batches - 1);
+    printf("\nsubmit per-batch wait (us), batch=0..%d (owner=batch%%desc_threads):\n", n_batches - 1);
     printf("  batch  owner ");
-    for (int t = 0; t < desc_thread_count; t++)
+    for (int t = 0; t < submit_thread_count; t++)
         printf(" %7d", t);
     printf("  %8s\n", "max");
     for (int b = 0; b < n_batches; b++) {
         int owner = b % desc_thread_count;
         uint64_t max_wait = 0;
         printf("  %5d  %5d ", b, owner);
-        for (int t = 0; t < desc_thread_count; t++) {
+        for (int t = 0; t < submit_thread_count; t++) {
             uint64_t w = g_submit_wait_map[t][b];
             printf(" %7llu", (unsigned long long)(w / 1000));
             if (w > max_wait) max_wait = w;
@@ -396,14 +406,14 @@ int main(int argc, char *argv[])
 
     printf("\nsubmit per-batch handoff (us), desc set_flag → submit detected:\n");
     printf("  batch  owner ");
-    for (int t = 0; t < desc_thread_count; t++)
+    for (int t = 0; t < submit_thread_count; t++)
         printf(" %7d", t);
     printf("  %8s\n", "max");
     for (int b = 0; b < n_batches; b++) {
         int owner = b % desc_thread_count;
         uint64_t max_h = 0;
         printf("  %5d  %5d ", b, owner);
-        for (int t = 0; t < desc_thread_count; t++) {
+        for (int t = 0; t < submit_thread_count; t++) {
             uint64_t h = g_submit_handoff_map[t][b];
             printf(" %7llu", (unsigned long long)(h / 1000));
             if (h > max_h) max_h = h;
@@ -440,6 +450,8 @@ int main(int argc, char *argv[])
     for (int i = 1; i < desc_thread_count; i++) {
         if (desc_args[i].start_ns < pipeline_earliest)
             pipeline_earliest = desc_args[i].start_ns;
+    }
+    for (int i = 1; i < submit_thread_count; i++) {
         if (submit_args[i].end_ns > pipeline_latest)
             pipeline_latest = submit_args[i].end_ns;
     }
