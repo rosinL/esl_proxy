@@ -19,6 +19,12 @@
 #define MAX_TENSOR_NUM 2048
 #endif
 
+#ifndef SUBMIT_MAX_THREADS
+#define SUBMIT_MAX_THREADS 128
+#endif
+
+#define SUBMIT_MAX_BATCHES 256
+
 #define RING_SIZE 4096
 
 #ifndef QWEN3_SPMD_TIER

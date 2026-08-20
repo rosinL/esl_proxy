@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/resource.h>
 
 #include "log.h"
 #include "orch_config.h"
@@ -14,6 +17,8 @@
 
 extern uint32_t alloc_task_id;
 extern struct predecessor_list g_predecessors[];
+extern uint64_t g_submit_wait_map[SUBMIT_MAX_THREADS][SUBMIT_MAX_BATCHES];
+extern int g_submit_n_batches;
 
 static int dump_predecessors(const char *path, int total_task_cnt)
 {
@@ -67,6 +72,8 @@ struct desc_thread_arg {
     uint64_t elapsed_ns;
     uint64_t start_ns;
     uint64_t end_ns;
+    long voluntary_ctxt_switches;
+    long nonvoluntary_ctxt_switches;
     int core_id;
 };
 
@@ -80,6 +87,8 @@ struct submit_thread_arg {
     uint64_t spin_ns;
     uint64_t compute_ns;
     uint64_t spin_count;
+    long voluntary_ctxt_switches;
+    long nonvoluntary_ctxt_switches;
     int core_id;
 };
 
@@ -102,8 +111,24 @@ static void pin_cpu(int core_id)
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 }
 
+static void set_thread_name(const char *prefix, int id)
+{
+    char name[16];
+    snprintf(name, sizeof(name), "%s_%d", prefix, id);
+    pthread_setname_np(pthread_self(), name);
+}
+
+static void read_ctxt_switches(long *vol, long *nonvol)
+{
+    struct rusage ru;
+    getrusage(RUSAGE_THREAD, &ru);
+    *vol = ru.ru_nvcsw;
+    *nonvol = ru.ru_nivcsw;
+}
+
 static void *alloc_thread_func(void *arg)
 {
+    set_thread_name("alloc", 0);
     uint64_t orch_args = (uint64_t)(uintptr_t)arg;
     while (!atomic_load_explicit(&g_alloc_start, memory_order_acquire)) {}
     orc_alloc_call(orch_args);
@@ -114,11 +139,17 @@ static void *alloc_thread_func(void *arg)
 static void *desc_thread_func(void *arg)
 {
     struct desc_thread_arg *targ = (struct desc_thread_arg *)arg;
+    set_thread_name("desc", targ->thread_id);
     pin_cpu(targ->core_id);
     pthread_barrier_wait(&g_phase_barrier);
+    long vol0, nonvol0, vol1, nonvol1;
+    read_ctxt_switches(&vol0, &nonvol0);
     targ->start_ns = get_time_ns();
     targ->task_count = orc_desc_call(targ->orch_args, targ->thread_id, &targ->created_cnt);
     targ->end_ns = get_time_ns();
+    read_ctxt_switches(&vol1, &nonvol1);
+    targ->voluntary_ctxt_switches = vol1 - vol0;
+    targ->nonvoluntary_ctxt_switches = nonvol1 - nonvol0;
     targ->elapsed_ns = targ->end_ns - targ->start_ns;
     atomic_fetch_add_explicit(&g_pipeline_done_cnt, 1, memory_order_release);
     return NULL;
@@ -127,12 +158,18 @@ static void *desc_thread_func(void *arg)
 static void *submit_thread_func(void *arg)
 {
     struct submit_thread_arg *targ = (struct submit_thread_arg *)arg;
+    set_thread_name("submit", targ->thread_id);
     pin_cpu(targ->core_id);
     pthread_barrier_wait(&g_phase_barrier);
+    long vol0, nonvol0, vol1, nonvol1;
+    read_ctxt_switches(&vol0, &nonvol0);
     targ->start_ns = get_time_ns();
     orc_submit_call(targ->thread_id, targ->total_tasks, &targ->submit_cnt,
                     &targ->spin_ns, &targ->compute_ns, &targ->spin_count);
     targ->end_ns = get_time_ns();
+    read_ctxt_switches(&vol1, &nonvol1);
+    targ->voluntary_ctxt_switches = vol1 - vol0;
+    targ->nonvoluntary_ctxt_switches = nonvol1 - nonvol0;
     targ->elapsed_ns = targ->end_ns - targ->start_ns;
     atomic_fetch_add_explicit(&g_pipeline_done_cnt, 1, memory_order_release);
     return NULL;
@@ -288,13 +325,15 @@ int main(int argc, char *argv[])
     for (int i = 0; i < desc_thread_count; i++) {
         double throughput = (double)desc_args[i].task_count / (double)desc_args[i].elapsed_ns * (double)1000.0;
         double time_240_us = 240.0 / throughput;
-        printf("  thread %2d: tasks=%d  created=%d  time=%llu ns  throughput=%.2f MTasks/s  time_240=%.2f us\n",
+        printf("  thread %2d: tasks=%d  created=%d  time=%llu ns  throughput=%.2f MTasks/s  time_240=%.2f us  ctxt=%ld(vol)+%ld(inv)\n",
                desc_args[i].thread_id,
                desc_args[i].task_count,
                desc_args[i].created_cnt,
                (unsigned long long)desc_args[i].elapsed_ns,
                throughput,
-               time_240_us);
+               time_240_us,
+               desc_args[i].voluntary_ctxt_switches,
+               desc_args[i].nonvoluntary_ctxt_switches);
         total_cnt += desc_args[i].created_cnt;
         if (desc_args[i].elapsed_ns > desc_max_ns)
             desc_max_ns = desc_args[i].elapsed_ns;
@@ -311,14 +350,16 @@ int main(int argc, char *argv[])
     uint64_t submit_sum_ns = 0;
     for (int i = 0; i < desc_thread_count; i++) {
         double throughput = (double)submit_args[i].submit_cnt / (double)submit_args[i].elapsed_ns * (double)1000.0;
-        printf("  thread %2d: submitted=%d  time=%llu ns (spin=%llu  compute=%llu  spin_cnt=%llu)  throughput=%.2f MTasks/s\n",
+        printf("  thread %2d: submitted=%d  time=%llu ns (spin=%llu  compute=%llu  spin_cnt=%llu)  throughput=%.2f MTasks/s  ctxt=%ld(vol)+%ld(inv)\n",
                submit_args[i].thread_id,
                submit_args[i].submit_cnt,
                (unsigned long long)submit_args[i].elapsed_ns,
                (unsigned long long)submit_args[i].spin_ns,
                (unsigned long long)submit_args[i].compute_ns,
                (unsigned long long)submit_args[i].spin_count,
-               throughput);
+               throughput,
+               submit_args[i].voluntary_ctxt_switches,
+               submit_args[i].nonvoluntary_ctxt_switches);
         total_submit_cnt += submit_args[i].submit_cnt;
         if (submit_args[i].elapsed_ns > submit_max_ns)
             submit_max_ns = submit_args[i].elapsed_ns;
@@ -329,6 +370,29 @@ int main(int argc, char *argv[])
 
     double desc_avg_ns = (double)desc_sum_ns / desc_thread_count;
     double submit_avg_ns = (double)submit_sum_ns / desc_thread_count;
+
+    int n_batches = (total_tasks + desc_batch_size - 1) / desc_batch_size;
+    if (n_batches > SUBMIT_MAX_BATCHES) n_batches = SUBMIT_MAX_BATCHES;
+    g_submit_n_batches = n_batches;
+
+    printf("\nsubmit per-batch wait (us), batch=0..%d (owner=batch%%threads):\n", n_batches - 1);
+    printf("  batch  owner ");
+    for (int t = 0; t < desc_thread_count; t++)
+        printf(" %7d", t);
+    printf("  %8s\n", "max");
+    for (int b = 0; b < n_batches; b++) {
+        int owner = b % desc_thread_count;
+        uint64_t max_wait = 0;
+        printf("  %5d  %5d ", b, owner);
+        for (int t = 0; t < desc_thread_count; t++) {
+            uint64_t w = g_submit_wait_map[t][b];
+            printf(" %7llu", (unsigned long long)(w / 1000));
+            if (w > max_wait) max_wait = w;
+        }
+        printf("  %8llu", (unsigned long long)(max_wait / 1000));
+        printf("\n");
+    }
+
     printf("\nphase timing:\n");
     printf("  total elapsed (alloc + desc||submit pipeline): %llu ns\n",
            (unsigned long long)elapsed_ns);

@@ -42,10 +42,6 @@ typedef struct {
     _Alignas(128) uint8_t buf[TM_PT_BUF_BYTES];
 } TmPtState;
 
-#ifndef SUBMIT_MAX_THREADS
-#define SUBMIT_MAX_THREADS 128
-#endif
-
 static TmPtState g_tm_pt[SUBMIT_MAX_THREADS];
 
 static inline void tm_pt_init(TmPtState *state)
@@ -152,6 +148,11 @@ static inline int submit_owns(int tid, int thread_id)
     return (batch % desc_thread_count) == thread_id;
 }
 
+extern int g_submit_n_batches;
+
+uint64_t g_submit_wait_map[SUBMIT_MAX_THREADS][SUBMIT_MAX_BATCHES];
+int g_submit_n_batches = 0;
+
 void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt,
                          uint64_t *spin_ns, uint64_t *compute_ns, uint64_t *spin_count)
 {
@@ -161,6 +162,10 @@ void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt,
     uint64_t spin_total = 0;
     uint64_t compute_total = 0;
     uint64_t spins = 0;
+    uint64_t *wait_map = g_submit_wait_map[thread_id];
+
+    for (int batch = 0; batch < n_batches && batch < SUBMIT_MAX_BATCHES; batch++)
+        wait_map[batch] = 0;
 
     for (int batch = 0; batch < n_batches; batch++) {
         uint64_t t0 = get_time_ns();
@@ -171,7 +176,10 @@ void orchestrator_submit(int thread_id, int total_tasks, int *submit_cnt,
             spins++;
         }
         uint64_t t1 = get_time_ns();
-        spin_total += t1 - t0;
+        uint64_t wait_ns = t1 - t0;
+        spin_total += wait_ns;
+        if (batch < SUBMIT_MAX_BATCHES)
+            wait_map[batch] = wait_ns;
 
         int batch_start = batch * desc_batch_size;
         int batch_end = batch_start + desc_batch_size;
